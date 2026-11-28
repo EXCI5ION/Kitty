@@ -31,12 +31,14 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStyleFactory,
     QTabWidget,
+    QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from kitty import __version__
+from kitty.descriptive import DescriptiveResult, calculate_descriptive
 from kitty.import_dialog import MatrixSetupDialog
 from kitty.matrix_io import (
     MatrixImportError,
@@ -92,6 +94,7 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("Kitty", "Kitty")
         self.project: ProjectState | None = None
         self.validation_report: ValidationReport | None = None
+        self.descriptive_result: DescriptiveResult | None = None
         self.direct_contrast: tuple[str, str] | None = None
         self._loading = False
         self.undo_stack = QUndoStack(self)
@@ -202,7 +205,7 @@ class MainWindow(QMainWindow):
         self.heatmap_page = self._placeholder_page("Sin heatmap")
         self.foldchange_page = self._placeholder_page("Sin resultados")
         self.boxplot_page = self._placeholder_page("Sin boxplots")
-        self.tables_page = self._placeholder_page("Sin tablas")
+        self.tables_page = self._build_tables_page()
         self.results_tabs.addTab(self.heatmap_page, "Heatmap")
         self.results_tabs.addTab(self.foldchange_page, "Fold Change")
         self.results_tabs.addTab(self.boxplot_page, "Boxplot")
@@ -220,6 +223,56 @@ class MainWindow(QMainWindow):
         label.setObjectName("placeholder")
         label.setAlignment(Qt.AlignCenter)
         layout.addWidget(label)
+        return page
+
+    def _build_tables_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        navigation = QHBoxLayout()
+        self.previous_variable_button = QPushButton("‹")
+        self.previous_variable_button.setToolTip("Variable anterior")
+        self.previous_variable_button.setFixedWidth(36)
+        self.previous_variable_button.clicked.connect(
+            lambda: self._move_table_variable(-1)
+        )
+        self.table_variable_combo = QComboBox()
+        self.table_variable_combo.currentIndexChanged.connect(
+            lambda _index: self._show_descriptive_variable()
+        )
+        self.next_variable_button = QPushButton("›")
+        self.next_variable_button.setToolTip("Variable siguiente")
+        self.next_variable_button.setFixedWidth(36)
+        self.next_variable_button.clicked.connect(
+            lambda: self._move_table_variable(1)
+        )
+        navigation.addWidget(self.previous_variable_button)
+        navigation.addWidget(self.table_variable_combo, 1)
+        navigation.addWidget(self.next_variable_button)
+        layout.addLayout(navigation)
+
+        self.tables_status_label = QLabel("Sin tablas")
+        self.tables_status_label.setObjectName("placeholder")
+        self.tables_status_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.tables_status_label, 1)
+
+        self.descriptive_table = QTableWidget(0, 4)
+        self.descriptive_table.setHorizontalHeaderLabels(
+            ["Clase", "n", "Media ± DE", "Observación"]
+        )
+        self.descriptive_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.descriptive_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.descriptive_table.setAlternatingRowColors(True)
+        self.descriptive_table.verticalHeader().setVisible(False)
+        header = self.descriptive_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        self.descriptive_table.hide()
+        layout.addWidget(self.descriptive_table, 1)
+
+        self._set_table_navigation_enabled(False)
         return page
 
     def _build_menus(self) -> None:
@@ -451,6 +504,14 @@ class MainWindow(QMainWindow):
         if self.project is None:
             return
         self.validation_report = validate_project(self.project)
+        if self.validation_report.is_valid:
+            dataset = self.validation_report.dataset
+            if dataset is not None:
+                self.descriptive_result = calculate_descriptive(dataset)
+                self._populate_descriptive_table()
+        else:
+            self.descriptive_result = None
+            self._clear_descriptive_table()
         self.results_tabs.setCurrentIndex(0)
         self._update_summary()
         if self.validation_report.is_valid:
@@ -460,6 +521,86 @@ class MainWindow(QMainWindow):
 
     def _invalidate_validation(self) -> None:
         self.validation_report = None
+        self.descriptive_result = None
+        if hasattr(self, "descriptive_table"):
+            self._clear_descriptive_table()
+
+    def _populate_descriptive_table(self) -> None:
+        result = self.descriptive_result
+        if result is None:
+            self._clear_descriptive_table()
+            return
+        self.table_variable_combo.blockSignals(True)
+        try:
+            self.table_variable_combo.clear()
+            for variable_id, variable_name in zip(
+                result.variable_ids,
+                result.variable_names,
+            ):
+                self.table_variable_combo.addItem(variable_name, variable_id)
+        finally:
+            self.table_variable_combo.blockSignals(False)
+        self._set_table_navigation_enabled(bool(result.variable_ids))
+        self.tables_status_label.hide()
+        self.descriptive_table.show()
+        self._show_descriptive_variable()
+
+    def _clear_descriptive_table(self) -> None:
+        self.table_variable_combo.blockSignals(True)
+        try:
+            self.table_variable_combo.clear()
+        finally:
+            self.table_variable_combo.blockSignals(False)
+        self.descriptive_table.setRowCount(0)
+        self.descriptive_table.hide()
+        self.tables_status_label.setText("Sin tablas")
+        self.tables_status_label.show()
+        self._set_table_navigation_enabled(False)
+
+    def _set_table_navigation_enabled(self, enabled: bool) -> None:
+        self.table_variable_combo.setEnabled(enabled)
+        self.previous_variable_button.setEnabled(enabled)
+        self.next_variable_button.setEnabled(enabled)
+
+    def _move_table_variable(self, offset: int) -> None:
+        count = self.table_variable_combo.count()
+        if count:
+            current = self.table_variable_combo.currentIndex()
+            self.table_variable_combo.setCurrentIndex((current + offset) % count)
+
+    def _show_descriptive_variable(self) -> None:
+        result = self.descriptive_result
+        variable_id = self.table_variable_combo.currentData()
+        if result is None or variable_id is None:
+            return
+        summaries = result.for_variable(str(variable_id))
+        self.descriptive_table.setRowCount(len(summaries))
+        for row, summary in enumerate(summaries):
+            class_item = QTableWidgetItem(summary.class_name)
+            n_item = QTableWidgetItem(str(summary.n))
+            n_item.setTextAlignment(Qt.AlignCenter)
+            deviation = (
+                self._format_number(summary.standard_deviation)
+                if summary.standard_deviation is not None
+                else "—"
+            )
+            value_item = QTableWidgetItem(
+                f"{self._format_number(summary.mean)} ± {deviation}"
+            )
+            value_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            observation = (
+                "DE indefinida (n < 2)"
+                if summary.standard_deviation is None
+                else ""
+            )
+            self.descriptive_table.setItem(row, 0, class_item)
+            self.descriptive_table.setItem(row, 1, n_item)
+            self.descriptive_table.setItem(row, 2, value_item)
+            self.descriptive_table.setItem(row, 3, QTableWidgetItem(observation))
+
+    @staticmethod
+    def _format_number(value: float) -> str:
+        return f"{value:.3f}"
 
     def _update_actions(self) -> None:
         has_project = self.project is not None

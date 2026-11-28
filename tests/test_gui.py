@@ -197,4 +197,10 @@ def test_execute_validates_data_and_updates_summary(
     assert window.validation_report.is_valid
     assert "Datos listos" in window.summary_label.text()
     assert "1 ceros" in window.summary_label.text()
+    assert window.descriptive_result is not None
+    assert window.table_variable_combo.currentText() == "A"
+    assert window.descriptive_table.rowCount() == 2
+    assert window.descriptive_table.item(0, 0).text() == "Control"
+    assert window.descriptive_table.item(0, 1).text() == "2"
+    assert window.descriptive_table.item(0, 2).text() == "0.500 ± 0.707"
     window.close()
