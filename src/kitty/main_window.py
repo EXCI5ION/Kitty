@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt
@@ -39,11 +40,11 @@ from kitty import __version__
 from kitty.import_dialog import MatrixSetupDialog
 from kitty.matrix_io import (
     MatrixImportError,
-    list_sheet_names,
     load_matrix,
     prepare_matrix,
 )
 from kitty.project import ProjectState
+from kitty.validation import ValidationReport, validate_project
 from kitty.widgets import EditableMetadataTable
 
 
@@ -90,6 +91,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = QSettings("Kitty", "Kitty")
         self.project: ProjectState | None = None
+        self.validation_report: ValidationReport | None = None
         self.direct_contrast: tuple[str, str] | None = None
         self._loading = False
         self.undo_stack = QUndoStack(self)
@@ -148,6 +150,9 @@ class MainWindow(QMainWindow):
 
         self.multiple_comparison = QCheckBox("Comparación múltiple")
         self.multiple_comparison.setChecked(True)
+        self.multiple_comparison.toggled.connect(
+            lambda _checked: self._update_summary()
+        )
         controls_layout.addWidget(self.multiple_comparison)
 
         posthoc_row = QHBoxLayout()
@@ -156,6 +161,9 @@ class MainWindow(QMainWindow):
         self.posthoc.addItem("Tukey HSD", "tukey")
         self.posthoc.addItem("Games–Howell", "games_howell")
         self.posthoc.addItem("Dunn", "dunn")
+        self.posthoc.currentIndexChanged.connect(
+            lambda _index: self._update_summary()
+        )
         posthoc_row.addWidget(self.posthoc, 1)
         controls_layout.addLayout(posthoc_row)
         self.multiple_comparison.toggled.connect(self.posthoc.setEnabled)
@@ -318,27 +326,14 @@ class MainWindow(QMainWindow):
             self,
             "Cargar matriz",
             start_directory,
-            "Matrices (*.csv *.tsv *.txt *.xlsx *.ods);;Todos los archivos (*)",
+            "Matrices delimitadas (*.csv *.txt);;Todos los archivos (*)",
         )
         if not path:
             return None
         self.settings.setValue("last_directory", str(Path(path).parent))
         try:
-            sheets = list_sheet_names(path)
-            sheet_name = None
-            if sheets:
-                sheet_name, accepted = QInputDialog.getItem(
-                    self,
-                    "Hoja",
-                    "Seleccionar",
-                    list(sheets),
-                    0,
-                    False,
-                )
-                if not accepted:
-                    return None
             QApplication.setOverrideCursor(Qt.WaitCursor)
-            return load_matrix(path, sheet_name)
+            return load_matrix(path)
         except (OSError, MatrixImportError) as error:
             QMessageBox.critical(self, "Cargar", str(error))
             return None
@@ -358,6 +353,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted or dialog.result_state is None:
             return
         self.project = dialog.result_state
+        self._invalidate_validation()
         self._populate_samples()
         self._update_summary()
         self._update_actions()
@@ -396,6 +392,7 @@ class MainWindow(QMainWindow):
             sample.class_name = item.text().strip()
         elif item.column() == 3:
             sample.individual = item.text().strip()
+        self._invalidate_validation()
         self._refresh_classes()
         self._update_summary()
 
@@ -423,6 +420,7 @@ class MainWindow(QMainWindow):
                 self.project.samples[row].class_name = class_name
         finally:
             self._loading = False
+        self._invalidate_validation()
         self._refresh_classes()
         self._update_summary()
 
@@ -452,11 +450,16 @@ class MainWindow(QMainWindow):
     def execute_analysis(self) -> None:
         if self.project is None:
             return
-        QMessageBox.information(
-            self,
-            "Kitty",
-            "La configuración quedó lista. El motor estadístico será el próximo módulo.",
-        )
+        self.validation_report = validate_project(self.project)
+        self.results_tabs.setCurrentIndex(0)
+        self._update_summary()
+        if self.validation_report.is_valid:
+            self.statusBar().showMessage("Datos validados")
+        else:
+            self.statusBar().showMessage("La matriz requiere revisión")
+
+    def _invalidate_validation(self) -> None:
+        self.validation_report = None
 
     def _update_actions(self) -> None:
         has_project = self.project is not None
@@ -480,23 +483,59 @@ class MainWindow(QMainWindow):
             f"{name}: {count}" for name, count in classes.items()
         ) or "Sin clases asignadas"
         contrast = (
-            f"{self.direct_contrast[1]} / {self.direct_contrast[0]}"
+            f"{html.escape(self.direct_contrast[1])} / "
+            f"{html.escape(self.direct_contrast[0])}"
             if self.direct_contrast
             else "Sin definir"
         )
         orientation = "traspuesta" if matrix.transposed else "original"
+        multiple = (
+            f"Activada · {html.escape(self.posthoc.currentText())}"
+            if self.multiple_comparison.isChecked()
+            else "Desactivada"
+        )
+        validation = self._validation_summary_html()
         self.summary_label.setText(
-            f"<h2>{matrix.source.path.name}</h2>"
+            f"<h2>{html.escape(matrix.source.path.name)}</h2>"
             f"<p><b>Matriz</b><br>"
             f"{project.included_sample_count()} muestras incluidas · "
             f"{project.included_variable_count()} variables incluidas · "
             f"orientación {orientation}</p>"
-            f"<p><b>Clases</b><br>{class_text}</p>"
+            f"<p><b>Clases</b><br>{html.escape(class_text)}</p>"
             f"<p><b>Contraste</b><br>{contrast}</p>"
-            f"<p><b>Comparación múltiple</b><br>Sin resultados</p>"
+            f"<p><b>Comparación múltiple</b><br>{multiple}</p>"
+            f"{validation}"
+        )
+
+    def _validation_summary_html(self) -> str:
+        report = self.validation_report
+        if report is None:
+            return "<p><b>Revisión de datos</b><br>Pendiente de ejecutar.</p>"
+        status = "Datos listos" if report.is_valid else "Requiere revisión"
+        details = (
+            f"{report.zero_count} ceros · "
+            f"{report.negative_count} negativos · "
+            f"{len(report.constant_variables)} variables constantes"
+        )
+        if not report.issues:
+            issues = "<p>No se detectaron problemas.</p>"
+        else:
+            items = "".join(
+                "<li><b>"
+                + ("Error" if issue.severity == "error" else "Advertencia")
+                + ":</b> "
+                + html.escape(issue.message)
+                + "</li>"
+                for issue in report.issues
+            )
+            issues = f"<ul>{items}</ul>"
+        return (
+            f"<p><b>Revisión de datos</b><br>{status}<br>{details}</p>"
+            f"{issues}"
         )
 
     def _clear_results(self) -> None:
+        self._invalidate_validation()
         for page, text in (
             (self.heatmap_page, "Sin heatmap"),
             (self.foldchange_page, "Sin resultados"),

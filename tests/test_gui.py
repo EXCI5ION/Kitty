@@ -162,3 +162,39 @@ def test_matrix_preview_uses_dark_cell_backgrounds(
     assert model.data(model.index(1, 1), Qt.BackgroundRole).name() == "#293138"
     model.set_theme("crt")
     assert model.data(model.index(1, 1), Qt.BackgroundRole).name() == "#09140d"
+
+
+def test_execute_validates_data_and_updates_summary(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "validation.csv"
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        csv.writer(stream).writerows(
+            [
+                ["Muestra", "A"],
+                ["C1", "0"],
+                ["C2", "1"],
+                ["T1", "2"],
+                ["T2", "3"],
+            ]
+        )
+    window = MainWindow()
+    source = load_matrix(path)
+    monkey_source = lambda: source
+    window._choose_source = monkey_source
+    window.load_project_matrix()
+    assert window.project is not None
+    for sample, class_name in zip(
+        window.project.samples,
+        ("Control", "Control", "Tratado", "Tratado"),
+    ):
+        sample.class_name = class_name
+
+    window.execute_analysis()
+
+    assert window.validation_report is not None
+    assert window.validation_report.is_valid
+    assert "Datos listos" in window.summary_label.text()
+    assert "1 ceros" in window.summary_label.text()
+    window.close()

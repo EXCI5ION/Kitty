@@ -3,8 +3,9 @@
 Kitty es una aplicación de código abierto para organizar y ejecutar análisis
 estadístico univariado sobre matrices ómicas.
 
-La primera etapa del proyecto implementa una importación supervisada. El usuario
-puede revisar la matriz original, trasponerla, delimitar el bloque de datos,
+La primera etapa del proyecto implementa una importación supervisada de matrices
+delimitadas en formato CSV o TXT. El usuario puede revisar la matriz original,
+trasponerla, delimitar el bloque de datos,
 editar los nombres mostrados y asignar manualmente las clases experimentales.
 Kitty conserva los identificadores originales para mantener la trazabilidad.
 

@@ -143,8 +143,7 @@ class MatrixSetupDialog(QDialog):
     def _set_source(self) -> None:
         self.preview_model.set_source(self.source, transposed=self.transposed)
         self._reset_region()
-        sheet = f" · {self.source.sheet_name}" if self.source.sheet_name else ""
-        self.source_label.setText(f"{self.source.path.name}{sheet}")
+        self.source_label.setText(self.source.path.name)
 
     def _reset_region(self) -> None:
         self.header_row = 1

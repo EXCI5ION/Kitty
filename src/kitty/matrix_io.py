@@ -3,20 +3,12 @@ from __future__ import annotations
 import csv
 import io
 import math
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
-from xml.etree import ElementTree
 
 
-SUPPORTED_EXTENSIONS = {".csv", ".tsv", ".txt", ".xlsx", ".ods"}
-
-_ODS_NAMESPACES = {
-    "office": "urn:oasis:names:tc:opendocument:xmlns:office:1.0",
-    "table": "urn:oasis:names:tc:opendocument:xmlns:table:1.0",
-    "text": "urn:oasis:names:tc:opendocument:xmlns:text:1.0",
-}
+SUPPORTED_EXTENSIONS = {".csv", ".txt"}
 
 
 class MatrixImportError(ValueError):
@@ -26,7 +18,6 @@ class MatrixImportError(ValueError):
 @dataclass(frozen=True)
 class MatrixSource:
     path: Path
-    sheet_name: str | None
     rows: tuple[tuple[str, ...], ...]
     delimiter: str | None = None
 
@@ -109,30 +100,7 @@ class PreparedMatrix:
         }
 
 
-def list_sheet_names(path: str | Path) -> tuple[str, ...]:
-    source = Path(path)
-    suffix = source.suffix.lower()
-    if suffix == ".xlsx":
-        try:
-            from openpyxl import load_workbook
-        except ImportError as error:
-            raise MatrixImportError(
-                "Se necesita openpyxl para abrir libros de Excel."
-            ) from error
-        try:
-            workbook = load_workbook(source, read_only=True, data_only=True)
-        except Exception as error:
-            raise MatrixImportError(f"No se pudo abrir el libro de Excel: {error}") from error
-        try:
-            return tuple(workbook.sheetnames)
-        finally:
-            workbook.close()
-    if suffix == ".ods":
-        return tuple(name for name, _rows in _read_ods_tables(source))
-    return ()
-
-
-def load_matrix(path: str | Path, sheet_name: str | None = None) -> MatrixSource:
+def load_matrix(path: str | Path) -> MatrixSource:
     source = Path(path)
     if not source.is_file():
         raise FileNotFoundError(source)
@@ -140,30 +108,13 @@ def load_matrix(path: str | Path, sheet_name: str | None = None) -> MatrixSource
     if suffix not in SUPPORTED_EXTENSIONS:
         raise MatrixImportError(f"Formato no compatible: {suffix or 'sin extensión'}")
 
-    if suffix in {".csv", ".tsv", ".txt"}:
-        rows, delimiter = _read_delimited(source)
-        selected_sheet = None
-    elif suffix == ".xlsx":
-        rows = _read_xlsx(source, sheet_name)
-        delimiter = None
-        selected_sheet = sheet_name
-    else:
-        tables = _read_ods_tables(source)
-        if not tables:
-            raise MatrixImportError("El archivo ODS no contiene hojas.")
-        available = {name: rows for name, rows in tables}
-        selected_sheet = sheet_name or tables[0][0]
-        if selected_sheet not in available:
-            raise MatrixImportError(f"No existe la hoja «{selected_sheet}».")
-        rows = available[selected_sheet]
-        delimiter = None
+    rows, delimiter = _read_delimited(source)
 
     rectangular = _rectangularize(rows)
     if len(rectangular) < 2 or len(rectangular[0]) < 2:
         raise MatrixImportError("La fuente debe contener al menos dos filas y dos columnas.")
     return MatrixSource(
         path=source.resolve(),
-        sheet_name=selected_sheet,
         rows=rectangular,
         delimiter=delimiter,
     )
@@ -234,7 +185,7 @@ def _read_delimited(path: Path) -> tuple[list[list[str]], str]:
         ) from error
     if not text.strip():
         raise MatrixImportError("El archivo está vacío.")
-    delimiter = "\t" if path.suffix.lower() in {".tsv", ".txt"} else ","
+    delimiter = "\t" if path.suffix.lower() == ".txt" else ","
     try:
         delimiter = csv.Sniffer().sniff(text[:65536], delimiters=",;\t").delimiter
     except csv.Error:
@@ -244,101 +195,6 @@ def _read_delimited(path: Path) -> tuple[list[list[str]], str]:
     except csv.Error as error:
         raise MatrixImportError(f"El archivo delimitado no es válido: {error}") from error
     return rows, delimiter
-
-
-def _read_xlsx(path: Path, sheet_name: str | None) -> list[list[str]]:
-    try:
-        from openpyxl import load_workbook
-    except ImportError as error:
-        raise MatrixImportError(
-            "Se necesita openpyxl para abrir libros de Excel."
-        ) from error
-    try:
-        workbook = load_workbook(path, read_only=True, data_only=True)
-    except Exception as error:
-        raise MatrixImportError(f"No se pudo abrir el libro de Excel: {error}") from error
-    try:
-        selected = sheet_name or workbook.sheetnames[0]
-        if selected not in workbook.sheetnames:
-            raise MatrixImportError(f"No existe la hoja «{selected}».")
-        worksheet = workbook[selected]
-        return [
-            [_cell_text(value) for value in row]
-            for row in worksheet.iter_rows(values_only=True)
-        ]
-    finally:
-        workbook.close()
-
-
-def _read_ods_tables(path: Path) -> list[tuple[str, list[list[str]]]]:
-    try:
-        with zipfile.ZipFile(path) as archive:
-            content = archive.read("content.xml")
-    except (OSError, KeyError, zipfile.BadZipFile) as error:
-        raise MatrixImportError(f"No se pudo abrir el archivo ODS: {error}") from error
-    try:
-        root = ElementTree.fromstring(content)
-    except ElementTree.ParseError as error:
-        raise MatrixImportError(f"El contenido del archivo ODS no es válido: {error}") from error
-
-    table_tag = _qualified("table", "table")
-    row_tag = _qualified("table", "table-row")
-    cell_tags = {
-        _qualified("table", "table-cell"),
-        _qualified("table", "covered-table-cell"),
-    }
-    tables: list[tuple[str, list[list[str]]]] = []
-    for table in root.iter(table_tag):
-        name = table.get(_qualified("table", "name")) or f"Hoja {len(tables) + 1}"
-        rows: list[list[str]] = []
-        for row in table.findall(row_tag):
-            row_repeat = _positive_repeat(row.get(_qualified("table", "number-rows-repeated")))
-            values: list[str] = []
-            for cell in row:
-                if cell.tag not in cell_tags:
-                    continue
-                column_repeat = _positive_repeat(
-                    cell.get(_qualified("table", "number-columns-repeated"))
-                )
-                value = _ods_cell_text(cell)
-                if column_repeat > 100_000:
-                    if value:
-                        raise MatrixImportError("La hoja ODS declara demasiadas columnas repetidas.")
-                    column_repeat = 1
-                values.extend([value] * column_repeat)
-            while values and not values[-1]:
-                values.pop()
-            if any(values):
-                if row_repeat > 100_000:
-                    raise MatrixImportError("La hoja ODS declara demasiadas filas repetidas.")
-                rows.extend([values.copy() for _ in range(row_repeat)])
-        tables.append((name, rows))
-    return tables
-
-
-def _ods_cell_text(cell: ElementTree.Element) -> str:
-    value_type = cell.get(_qualified("office", "value-type"))
-    if value_type in {"float", "percentage", "currency"}:
-        return cell.get(_qualified("office", "value"), "")
-    if value_type == "boolean":
-        return cell.get(_qualified("office", "boolean-value"), "")
-    paragraphs = []
-    for paragraph in cell.findall(".//text:p", _ODS_NAMESPACES):
-        paragraphs.append("".join(paragraph.itertext()))
-    return "\n".join(paragraphs)
-
-
-def _qualified(prefix: str, name: str) -> str:
-    return f"{{{_ODS_NAMESPACES[prefix]}}}{name}"
-
-
-def _positive_repeat(value: str | None) -> int:
-    if value is None:
-        return 1
-    try:
-        return max(1, int(value))
-    except ValueError:
-        return 1
 
 
 def _rectangularize(rows: Iterable[Iterable[object]]) -> tuple[tuple[str, ...], ...]:

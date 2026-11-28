@@ -99,3 +99,25 @@ def test_invalid_region_is_rejected(tmp_path: Path) -> None:
             last_variable_column=2,
         )
 
+
+def test_tab_delimited_txt_is_supported(tmp_path: Path) -> None:
+    path = tmp_path / "matrix.txt"
+    path.write_text("Muestra\tA\tB\nS1\t1\t2\n", encoding="utf-8")
+
+    source = load_matrix(path)
+
+    assert source.delimiter == "\t"
+    assert source.rows == (("Muestra", "A", "B"), ("S1", "1", "2"))
+
+
+@pytest.mark.parametrize("suffix", [".xlsx", ".ods", ".tsv"])
+def test_spreadsheet_and_tsv_extensions_are_rejected(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    path = tmp_path / f"matrix{suffix}"
+    path.write_text("Muestra,A\nS1,1\n", encoding="utf-8")
+
+    with pytest.raises(MatrixImportError, match="Formato no compatible"):
+        load_matrix(path)
+
